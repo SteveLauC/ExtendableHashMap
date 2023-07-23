@@ -8,16 +8,18 @@ pub(crate) struct Bucket<K, V> {
     /// Bits that are unique to this bucket.
     ///
     /// # Weight
-    /// Say the global depth is `i`, weight of `bits[index]` is `2^(i-index-1)`.
+    /// Say the global depth is `i`, weight of `bits[index]` is
+    /// `2^(i-index-1)`.
     ///
     /// # Functionality of this field
-    /// When updating bucket pointers in `directory`, we need to do bit-string
-    /// match to find the corresponding bucket, string match is slow, we use
-    /// numeric value for a faster lookup.
+    /// When updating bucket pointers in `directory`, we need to do
+    /// bit-string match to find the corresponding bucket, string
+    /// match is slow, we use numeric value for a faster lookup.
     ///
     /// # Example
-    /// Say we have bits `[1]`, and the global depth is `3`, then the bits are
-    /// automatically expanded to `[1, 0, 0]`, and thus has value `4`.
+    /// Say we have bits `[1]`, and the global depth is `3`, then the
+    /// bits are automatically expanded to `[1, 0, 0]`, and thus
+    /// has value `4`.
     ///
     /// # local depth
     /// Local depth equals `self.bits.len()`.
@@ -39,11 +41,41 @@ pub(crate) enum BucketValue {
     Range(RangeInclusive<usize>),
 }
 
+impl BucketValue {
+    pub(crate) fn as_equal_to(&self) -> Option<usize> {
+        match self {
+            BucketValue::EqualTo(val) => Some(*val),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_range(&self) -> Option<&RangeInclusive<usize>> {
+        match self {
+            BucketValue::Range(val) => Some(val),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn last_half_range(&self) -> Option<RangeInclusive<usize>> {
+        match self {
+            BucketValue::Range(val) => {
+                let start = val.start();
+                let end = val.end();
+                let half_len = (end - start) / 2;
+
+                Some(RangeInclusive::new(*start + half_len, *end))
+            }
+            _ => None,
+        }
+    }
+}
+
 impl<K, V> Bucket<K, V> {
     /// Create a bucket with the specified configuration.
     ///
     /// # Panic
-    /// All numbers in `bits` should be valid binary numbers, i.e., be smaller than 2.
+    /// All numbers in `bits` should be valid binary numbers, i.e., be
+    /// smaller than 2.
     pub(crate) fn new(bits: &[u8]) -> Self {
         // check `bits`
         bits.iter().for_each(|bit| assert!(*bit < 2));
@@ -53,6 +85,12 @@ impl<K, V> Bucket<K, V> {
             keys: Vec::with_capacity(BUCKET_CAP),
             values: Vec::with_capacity(BUCKET_CAP),
         }
+    }
+
+    /// Return the bucket's local depth.
+    #[inline]
+    pub(crate) fn local_depth(&self) -> usize {
+        self.bits.len()
     }
 
     /// Given the global depth, calculate this bucket's value.
@@ -101,9 +139,6 @@ impl<K, V> Bucket<K, V> {
     }
 }
 
-
-
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -111,18 +146,12 @@ mod test {
     #[test]
     #[should_panic]
     fn bucket_new_invalid_bit() {
-        Bucket::<()>::new(1, &[3, 1]);
-    }
-
-    #[test]
-    #[should_panic]
-    fn bucket_new_zero_size() {
-        Bucket::<()>::new(0, &[1]);
+        Bucket::<(), ()>::new(&[3, 1]);
     }
 
     #[test]
     fn bucket_value() {
-        let bucket: Bucket<()> = Bucket::new(1, &[1, 1]);
+        let bucket: Bucket<(), ()> = Bucket::new(&[1, 1]);
 
         assert_eq!(
             bucket.value(3),
