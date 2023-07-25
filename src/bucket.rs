@@ -24,11 +24,11 @@ pub(crate) struct Bucket<K, V> {
     /// # local depth
     /// Local depth equals `self.bits.len()`.
     pub(crate) bits: Vec<u8>,
-    pub(crate) keys: Vec<K>,
-    pub(crate) values: Vec<V>,
+    pub(crate) data: Vec<(K, V)>,
 }
 
-/// A bucket's value
+/// A bucket's value, this is the **index** of directory entries that pointing
+/// to this bucket.
 ///
 /// Calculated through:
 /// 1. Global depth
@@ -42,26 +42,14 @@ pub(crate) enum BucketValue {
 }
 
 impl BucketValue {
-    pub(crate) fn as_equal_to(&self) -> Option<usize> {
-        match self {
-            BucketValue::EqualTo(val) => Some(*val),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn as_range(&self) -> Option<&RangeInclusive<usize>> {
-        match self {
-            BucketValue::Range(val) => Some(val),
-            _ => None,
-        }
-    }
-
     pub(crate) fn last_half_range(&self) -> Option<RangeInclusive<usize>> {
         match self {
             BucketValue::Range(val) => {
                 let start = val.start();
                 let end = val.end();
-                let half_len = (end - start) / 2;
+                let len = end - start + 1;
+                assert_eq!(len % 2, 0);
+                let half_len = len / 2;
 
                 Some(RangeInclusive::new(*start + half_len, *end))
             }
@@ -82,9 +70,16 @@ impl<K, V> Bucket<K, V> {
 
         Self {
             bits: bits.to_vec(),
-            keys: Vec::with_capacity(BUCKET_CAP),
-            values: Vec::with_capacity(BUCKET_CAP),
+            data: Vec::with_capacity(BUCKET_CAP),
         }
+    }
+
+    /// Return `true` if this `key` is included in this bucket.
+    pub(crate) fn contains(&self, key: &K) -> bool
+    where
+        K: Eq,
+    {
+        self.data.iter().any(|(k, _)| k == key)
     }
 
     /// Return the bucket's local depth.
@@ -133,9 +128,7 @@ impl<K, V> Bucket<K, V> {
     /// Return true if this bucket is full.
     #[inline]
     pub(crate) fn is_full(&self) -> bool {
-        assert_eq!(self.keys.len(), self.values.len());
-
-        self.keys.len() == self.values.capacity()
+        self.data.len() == self.data.capacity()
     }
 }
 

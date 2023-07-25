@@ -1,4 +1,11 @@
-use crate::bucket::{Bucket, BucketValue, BUCKET_CAP};
+use crate::{
+    bucket::{
+        Bucket,
+        BucketValue::{EqualTo, Range},
+        BUCKET_CAP,
+    },
+    util::{bits_to_value, get_first_n_bits},
+};
 use std::{
     borrow::Borrow,
     collections::hash_map::DefaultHasher,
@@ -20,12 +27,6 @@ pub struct HashMap<K, V> {
 }
 
 impl<K, V> HashMap<K, V> {
-    /// Return the global depth of this HashMap.
-    #[inline]
-    fn global_depth(&self) -> usize {
-        self.global_depth
-    }
-
     /// Create an empty `HashMap`.
     pub fn new() -> Self {
         let bucket0 = Bucket::new(&[0]);
@@ -54,7 +55,7 @@ impl<K, V> HashMap<K, V> {
 }
 
 impl<K: Hash, V> HashMap<K, V> {
-    /// Calculate which bucket `value` will go to.
+    /// Locate which bucket `value` will go to.
     fn locate_bucket<Q>(&self, key: &Q) -> usize
     where
         K: Borrow<Q>,
@@ -64,13 +65,85 @@ impl<K: Hash, V> HashMap<K, V> {
         key.hash(&mut default_hasher);
         let hash_res = default_hasher.finish();
 
-        // Use the last `self.global` bits as it is easy to
-        // calculate
-        (hash_res % 2_u64.pow(self.global_depth as _)) as usize
+        // Use the reverse last `self.global` bits
+        //
+        // NOTE: we need to ensure the following guarantee:
+        // Say the global depth is 1, and the hashing bits are `[0]`, after
+        // we increment the global depth to 2, the hashing bits have to be
+        // `[0, 0]` or `[0, 1]`
+        let first_bits = get_first_n_bits(self.global_depth, hash_res);
+        let directory_idx = bits_to_value(first_bits.as_slice());
+
+        self.directories[directory_idx]
     }
 
-    fn split(&mut self, bucket: ()) {
-        unimplemented!()
+    /// Split a bucket.
+    ///
+    /// Under most awful cases, this function will be called recursively.
+    fn split(&mut self, key: K, value: V, bucket_to_split: usize) {
+        let mut_ref_bucket = self.buckets.get_mut(bucket_to_split).unwrap();
+
+        let old_local_depth = mut_ref_bucket.local_depth();
+        let old_global_depth = self.global_depth;
+        assert!(old_local_depth <= old_global_depth);
+
+        let bucket_value = mut_ref_bucket.value(old_global_depth);
+        let mut bucket_slice = mut_ref_bucket.bits.clone();
+        mut_ref_bucket.bits.push(0);
+        bucket_slice.push(1);
+        let new_bucket = Bucket::new(bucket_slice.as_slice());
+        let new_bucket_idx = self.buckets.len();
+        self.buckets.push(new_bucket);
+
+        if old_local_depth < old_global_depth {
+            let last_half_directory_indexes =
+                // this bucket_value needs to be calculated before incrementing the local depth.
+                bucket_value.last_half_range().unwrap();
+
+            // redistribute pointers
+            for idx in last_half_directory_indexes {
+                self.directories[idx] = new_bucket_idx;
+            }
+        } else {
+            self.global_depth += 1;
+            for _ in 0..self.directories.len() {
+                self.directories.push(0);
+            }
+
+            for (bucket_idx, bucket) in self.buckets.iter().enumerate() {
+                let bucket_value = bucket.value(self.global_depth);
+
+                match bucket_value {
+                    EqualTo(idx) => self.directories[idx] = bucket_idx,
+                    Range(range) => {
+                        for idx in range {
+                            self.directories[idx] = bucket_idx;
+                        }
+                    }
+                }
+            }
+        }
+
+        // rehashing the existing items
+        let items_need_rehash = self.buckets[bucket_to_split]
+            .data
+            .drain(..)
+            .collect::<Vec<(K, V)>>();
+        for (k, v) in items_need_rehash {
+            let idx = self.locate_bucket(k.borrow());
+            assert!(idx == bucket_to_split || idx == new_bucket_idx);
+
+            self.buckets[idx].data.push((k, v));
+        }
+
+        // after split, try inserting the new item again
+        let idx = self.locate_bucket(key.borrow());
+        // let's do split again.
+        if self.buckets[idx].is_full() {
+            self.split(key, value, idx);
+        } else {
+            self.buckets[idx].data.push((key, value));
+        }
     }
 
     /// Insert `value` to this set.
@@ -78,49 +151,22 @@ impl<K: Hash, V> HashMap<K, V> {
     where
         K: Eq,
     {
-        let bucket_idx = self.locate_bucket(&key);
-        let bucket = self
-            .buckets
-            .get_mut(bucket_idx)
-            .expect("locate_bucket() returns a wrong index");
+        let bucket_idx = self.locate_bucket(key.borrow());
+        let mut_ref_bucket = self.buckets.get_mut(bucket_idx).unwrap();
 
         // Check existence
-        if bucket.keys.contains(&key) {
+        if mut_ref_bucket.contains(&key) {
             return Some(value);
         }
 
-        if !bucket.is_full() {
-            // ignore the returned Result as calling
-            // `unwrap()` on it requires the
+        if !mut_ref_bucket.is_full() {
+            // ignore the returned Result as calling `unwrap()` on it requires the
             // Debug impl of `V`
-            let _ = bucket.keys.push_within_capacity(key);
-            let _ = bucket.values.push_within_capacity(value);
-
-            self.len += 1;
+            let _ = mut_ref_bucket.data.push_within_capacity((key, value));
         } else {
-            let local_depth = bucket.local_depth();
-            let global_depth = self.global_depth;
-            assert!(local_depth <= global_depth);
-
-            if local_depth < global_depth {
-                let last_half_range = bucket
-                    .value(global_depth)
-                    .last_half_range()
-                    .expect("Should be range");
-                let mut bucket_slice = bucket.bits.clone();
-                bucket.bits.push(0);
-                bucket_slice.push(1);
-                let new_bucket = Bucket::new(bucket_slice.as_slice());
-                let new_bucket_idx = self.buckets.len();
-                self.buckets.push(new_bucket);
-
-                // redistribute pointers
-                for idx in last_half_range {
-                    self.directories[idx] = new_bucket_idx;
-                }
-            } else {
-            }
+            self.split(key, value, bucket_idx);
         }
+        self.len += 1;
 
         None
     }
@@ -136,9 +182,11 @@ impl<K: Hash, V> HashMap<K, V> {
             .get(bucket_idx)
             .expect("locate_bucket() returns a wrong index");
 
-        let idx = bucket.keys.iter().position(|item| item.borrow() == key)?;
-
-        Some(&bucket.values[idx])
+        bucket
+            .data
+            .iter()
+            .find(|(k, _)| k.borrow() == key)
+            .map(|kv| &kv.1)
     }
 
     pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
@@ -152,9 +200,11 @@ impl<K: Hash, V> HashMap<K, V> {
             .get_mut(bucket_idx)
             .expect("locate_bucket() returns a wrong index");
 
-        let idx = bucket.keys.iter().position(|item| item.borrow() == key)?;
-
-        Some(&mut bucket.values[idx])
+        bucket
+            .data
+            .iter_mut()
+            .find(|(k, _)| k.borrow() == key)
+            .map(|kv| &mut kv.1)
     }
 }
 
@@ -177,5 +227,15 @@ mod test {
         assert_eq!(map.insert(1, 1), Some(1));
 
         assert_eq!(map.get(&1), Some(&1));
+    }
+
+    #[test]
+    fn insert_1000_items() {
+        let mut map = HashMap::new();
+        for i in 0..1000 {
+            assert_eq!(map.insert(i, i), None);
+        }
+
+        assert_eq!(map.len(), 1000);
     }
 }
