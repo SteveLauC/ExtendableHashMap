@@ -1,5 +1,4 @@
 #![feature(vec_push_within_capacity)]
-#![feature(extract_if)]
 
 extern crate core;
 

@@ -12,7 +12,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-/// A set backed by Extendable Hashing.
+/// A map backed by Extendable Hashing.
 #[derive(Debug)]
 pub struct HashMap<K, V> {
     /// The number of elements
@@ -55,7 +55,7 @@ impl<K, V> HashMap<K, V> {
 }
 
 impl<K: Hash, V> HashMap<K, V> {
-    /// Locate which bucket `value` will go to.
+    /// Locate the bucket where `value` will go.
     fn locate_bucket<Q>(&self, key: &Q) -> usize
     where
         K: Borrow<Q>,
@@ -70,7 +70,7 @@ impl<K: Hash, V> HashMap<K, V> {
         // NOTE: we need to ensure the following guarantee:
         // Say the global depth is 1, and the hashing bits are `[0]`, after
         // we increment the global depth to 2, the hashing bits have to be
-        // `[0, 0]` or `[0, 1]`
+        // either `[0, 0]` or `[0, 1]`
         let first_bits = get_first_n_bits(self.global_depth, hash_res);
         let directory_idx = bits_to_value(first_bits.as_slice());
 
@@ -79,7 +79,7 @@ impl<K: Hash, V> HashMap<K, V> {
 
     /// Split a bucket.
     ///
-    /// Under most awful cases, this function will be called recursively.
+    /// Under awful cases, this function will be called recursively.
     fn split(&mut self, key: K, value: V, bucket_to_split: usize) {
         let mut_ref_bucket = self.buckets.get_mut(bucket_to_split).unwrap();
 
@@ -97,7 +97,8 @@ impl<K: Hash, V> HashMap<K, V> {
 
         if old_local_depth < old_global_depth {
             let last_half_directory_indexes =
-                // this bucket_value needs to be calculated before incrementing the local depth.
+                // this bucket_value needs to be calculated before incrementing
+                // the local depth because we are redistributing the old pointers.
                 bucket_value.last_half_range().unwrap();
 
             // redistribute pointers
@@ -110,6 +111,20 @@ impl<K: Hash, V> HashMap<K, V> {
                 self.directories.push(0);
             }
 
+            // Redistribute directory pointers
+            //
+            // As you can see, we need to redistribute *all* the pointers. When
+            // expanding the directory entry, we choose to *append* instead of
+            // *insert*ing as inserting to an array is not efficient
+            //
+            // [0, 1] => [00, 01, 10, 11] ([0, 1] => [0, 1, 2, 3])
+            //
+            // Appending is efficient but it will invalidate the pointers stored
+            // in the old directory entries, and thus we have to redistribute
+            // them all.
+            //
+            // What about using a linked list, well, we need fast random access
+            // when locating a bucket.
             for (bucket_idx, bucket) in self.buckets.iter().enumerate() {
                 let bucket_value = bucket.value(self.global_depth);
 
@@ -142,7 +157,11 @@ impl<K: Hash, V> HashMap<K, V> {
         if self.buckets[idx].is_full() {
             self.split(key, value, idx);
         } else {
-            self.buckets[idx].data.push((key, value));
+            if let Err(_) =
+                self.buckets[idx].data.push_within_capacity((key, value))
+            {
+                panic!("push_within_capacity failed")
+            }
         }
     }
 
@@ -160,9 +179,11 @@ impl<K: Hash, V> HashMap<K, V> {
         }
 
         if !mut_ref_bucket.is_full() {
-            // ignore the returned Result as calling `unwrap()` on it requires the
-            // Debug impl of `V`
-            let _ = mut_ref_bucket.data.push_within_capacity((key, value));
+            if let Err(_) =
+                mut_ref_bucket.data.push_within_capacity((key, value))
+            {
+                panic!("push_within_capacity failed")
+            }
         } else {
             self.split(key, value, bucket_idx);
         }
@@ -171,6 +192,7 @@ impl<K: Hash, V> HashMap<K, V> {
         None
     }
 
+    /// Returns a reference to the value corresponding to the key.
     pub fn get<Q>(&self, key: &Q) -> Option<&V>
     where
         Q: Eq + Hash,
@@ -189,6 +211,7 @@ impl<K: Hash, V> HashMap<K, V> {
             .map(|kv| &kv.1)
     }
 
+    /// Returns a mutable reference to the value corresponding to the key.
     pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
