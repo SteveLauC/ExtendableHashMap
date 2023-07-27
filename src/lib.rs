@@ -1,7 +1,5 @@
 #![feature(vec_push_within_capacity)]
 
-extern crate core;
-
 mod bucket;
 mod map;
 pub(crate) mod util;

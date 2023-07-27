@@ -26,9 +26,8 @@ pub struct HashMap<K, V> {
     buckets: Vec<Bucket<K, V>>,
 }
 
-impl<K, V> HashMap<K, V> {
-    /// Create an empty `HashMap`.
-    pub fn new() -> Self {
+impl<K, V> Default for HashMap<K, V> {
+    fn default() -> Self {
         let bucket0 = Bucket::new(&[0]);
         let bucket1 = Bucket::new(&[1]);
 
@@ -39,14 +38,27 @@ impl<K, V> HashMap<K, V> {
             buckets: vec![bucket0, bucket1],
         }
     }
+}
 
-    /// Returns the number of elements in the map.
+impl<K, V> HashMap<K, V> {
+    /// Create an empty `HashMap`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the number of elements in the map.
     #[inline]
     pub fn len(&self) -> usize {
         self.len
     }
 
-    /// Returns the number of elements the map can hold
+    /// Return true if this map is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Return the number of elements the map can hold
     /// without reallocating.
     #[inline]
     pub fn capacity(&self) -> usize {
@@ -55,7 +67,7 @@ impl<K, V> HashMap<K, V> {
 }
 
 impl<K: Hash, V> HashMap<K, V> {
-    /// Locate the bucket where `value` will go.
+    /// Locate the bucket where `key` will go.
     fn locate_bucket<Q>(&self, key: &Q) -> usize
     where
         K: Borrow<Q>,
@@ -79,7 +91,8 @@ impl<K: Hash, V> HashMap<K, V> {
 
     /// Split a bucket.
     ///
-    /// Under awful cases, this function will be called recursively.
+    /// Under awful cases, this function will be called recursively until the
+    /// `(key, value)` has been successfully inserted into the map.
     fn split(&mut self, key: K, value: V, bucket_to_split: usize) {
         let mut_ref_bucket = self.buckets.get_mut(bucket_to_split).unwrap();
 
@@ -153,15 +166,16 @@ impl<K: Hash, V> HashMap<K, V> {
 
         // after split, try inserting the new item again
         let idx = self.locate_bucket(key.borrow());
+        assert!(idx == bucket_to_split || idx == new_bucket_idx);
         // let's do split again.
         if self.buckets[idx].is_full() {
             self.split(key, value, idx);
-        } else {
-            if let Err(_) =
-                self.buckets[idx].data.push_within_capacity((key, value))
-            {
-                panic!("push_within_capacity failed")
-            }
+        } else if self.buckets[idx]
+            .data
+            .push_within_capacity((key, value))
+            .is_err()
+        {
+            panic!("push_within_capacity failed")
         }
     }
 
@@ -179,8 +193,10 @@ impl<K: Hash, V> HashMap<K, V> {
         }
 
         if !mut_ref_bucket.is_full() {
-            if let Err(_) =
-                mut_ref_bucket.data.push_within_capacity((key, value))
+            if mut_ref_bucket
+                .data
+                .push_within_capacity((key, value))
+                .is_err()
             {
                 panic!("push_within_capacity failed")
             }
@@ -190,6 +206,118 @@ impl<K: Hash, V> HashMap<K, V> {
         self.len += 1;
 
         None
+    }
+
+    /// Remove `key` from the map, return its value if it was previously in the
+    /// map.
+    ///
+    /// # Coalescence
+    ///
+    /// After deletion, we will try to merge the bucket where the `key` was
+    /// removed and its sibling bucket.
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        Q: Eq + Hash,
+        K: Borrow<Q>,
+    {
+        let bucket_idx = self.locate_bucket(key);
+        let mut_ref_bucket = self
+            .buckets
+            .get_mut(bucket_idx)
+            .expect("locate_bucket() returns a wrong index");
+        let key_idx = mut_ref_bucket
+            .data
+            .iter()
+            .position(|(k, _)| k.borrow() == key)?;
+        let (_, value) = mut_ref_bucket.data.remove(key_idx);
+        self.len -= 1;
+
+        let immut_ref_bucket = self.buckets.get(bucket_idx).unwrap();
+        // check if we can coalesce it and its sibling bucket and remove the bucket
+        if immut_ref_bucket.local_depth() >= 2 {
+            let mut bucket_bits = immut_ref_bucket
+                .bits
+                .iter()
+                .map(|u8| *u8 as usize)
+                .collect::<Vec<usize>>();
+            let bucket_last_bit = *bucket_bits.last().unwrap();
+            *bucket_bits.last_mut().unwrap() = 1 - bucket_last_bit;
+            bucket_bits.resize(self.global_depth, 0);
+
+            let sibling_idx =
+                self.directories[bits_to_value(bucket_bits.as_slice())];
+            let immut_ref_sibling_bucket =
+                self.buckets.get(sibling_idx).unwrap();
+
+            // sibling bucket exists
+            if immut_ref_sibling_bucket.local_depth()
+                == immut_ref_bucket.local_depth()
+            {
+                // The data of two buckets can fit into one bucket
+                if immut_ref_sibling_bucket.data.len()
+                    + immut_ref_bucket.data.len()
+                    < BUCKET_CAP
+                {
+                    // begin coalescence
+                    if bucket_last_bit == 1 {
+                        let bucket_value =
+                            immut_ref_bucket.value(self.global_depth);
+                        let bucket_data_clone = self
+                            .buckets
+                            .get_mut(bucket_idx)
+                            .unwrap()
+                            .data
+                            .drain(..)
+                            .collect::<Vec<_>>();
+                        let mut_ref_sibling_bucket =
+                            self.buckets.get_mut(sibling_idx).unwrap();
+
+                        // transfer data
+                        mut_ref_sibling_bucket.data.extend(bucket_data_clone);
+                        // decrease the local depth
+                        mut_ref_sibling_bucket.bits.pop().unwrap();
+                        // update directory entries
+                        match bucket_value {
+                            EqualTo(idx) => self.directories[idx] = sibling_idx,
+                            Range(range) => {
+                                for idx in range {
+                                    self.directories[idx] = sibling_idx;
+                                }
+                            }
+                        }
+
+                        self.buckets.remove(bucket_idx);
+                    } else {
+                        let sibling_bucket_value =
+                            immut_ref_sibling_bucket.value(self.global_depth);
+                        let sibling_bucket_data_clone = self
+                            .buckets
+                            .get_mut(sibling_idx)
+                            .unwrap()
+                            .data
+                            .drain(..)
+                            .collect::<Vec<_>>();
+                        let mut_ref_bucket =
+                            self.buckets.get_mut(bucket_idx).unwrap();
+
+                        mut_ref_bucket.data.extend(sibling_bucket_data_clone);
+                        mut_ref_bucket.bits.pop().unwrap();
+                        match sibling_bucket_value {
+                            EqualTo(idx) => self.directories[idx] = sibling_idx,
+                            Range(range) => {
+                                for idx in range {
+                                    self.directories[idx] = sibling_idx;
+                                }
+                            }
+                        }
+
+                        self.buckets.remove(sibling_idx);
+                    }
+                }
+            }
+        }
+
+        Some(value)
     }
 
     /// Returns a reference to the value corresponding to the key.
@@ -256,7 +384,9 @@ mod test {
     fn insert_1000_items() {
         let mut map = HashMap::new();
         for i in 0..1000 {
+            assert_eq!(map.get(&i), None);
             assert_eq!(map.insert(i, i), None);
+            assert_eq!(map.get(&i), Some(&i));
         }
 
         assert_eq!(map.len(), 1000);

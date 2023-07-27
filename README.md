@@ -1,3 +1,3 @@
 ## Extendable HashMap
 
-A map implemented backed by [Extendable Hashing](https://en.wikipedia.org/wiki/Extendible_hashing).
+A map implementation backed by [Extendable Hashing](https://en.wikipedia.org/wiki/Extendible_hashing).
