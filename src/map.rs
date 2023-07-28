@@ -9,11 +9,11 @@ use crate::{
 use std::{
     borrow::Borrow,
     collections::hash_map::DefaultHasher,
+    fmt::{Debug, Formatter},
     hash::{Hash, Hasher},
 };
 
 /// A map backed by Extendable Hashing.
-#[derive(Debug)]
 pub struct HashMap<K, V> {
     /// The number of elements
     len: usize,
@@ -24,6 +24,24 @@ pub struct HashMap<K, V> {
     directories: Vec<usize>,
     /// Buckets
     buckets: Vec<Bucket<K, V>>,
+}
+
+impl<K, V> Debug for HashMap<K, V>
+where
+    K: Debug,
+    V: Debug,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Extendable HashMap")?;
+        writeln!(f, "len: {}", self.len)?;
+        writeln!(f, "global depth: {}", self.global_depth)?;
+        writeln!(f, "directories: {:?}", self.directories)?;
+        for (idx, bucket) in self.buckets.iter().enumerate() {
+            writeln!(f, "{:5} {:?}", idx, bucket)?;
+        }
+
+        Ok(())
+    }
 }
 
 impl<K, V> Default for HashMap<K, V> {
@@ -287,6 +305,22 @@ impl<K: Hash, V> HashMap<K, V> {
                         }
 
                         self.buckets.remove(bucket_idx);
+
+                        // directory entries for bucket since index `bucket_idx` are invalidated, update them
+                        for bucket_idx in bucket_idx..self.buckets.len() {
+                            let value = self.buckets[bucket_idx]
+                                .value(self.global_depth);
+                            match value {
+                                EqualTo(idx) => {
+                                    self.directories[idx] = bucket_idx
+                                }
+                                Range(range) => {
+                                    for idx in range {
+                                        self.directories[idx] = bucket_idx;
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         let sibling_bucket_value =
                             immut_ref_sibling_bucket.value(self.global_depth);
@@ -303,15 +337,30 @@ impl<K: Hash, V> HashMap<K, V> {
                         mut_ref_bucket.data.extend(sibling_bucket_data_clone);
                         mut_ref_bucket.bits.pop().unwrap();
                         match sibling_bucket_value {
-                            EqualTo(idx) => self.directories[idx] = sibling_idx,
+                            EqualTo(idx) => self.directories[idx] = bucket_idx,
                             Range(range) => {
                                 for idx in range {
-                                    self.directories[idx] = sibling_idx;
+                                    self.directories[idx] = bucket_idx;
                                 }
                             }
                         }
 
                         self.buckets.remove(sibling_idx);
+
+                        for bucket_idx in sibling_idx..self.buckets.len() {
+                            let value = self.buckets[bucket_idx]
+                                .value(self.global_depth);
+                            match value {
+                                EqualTo(idx) => {
+                                    self.directories[idx] = bucket_idx
+                                }
+                                Range(range) => {
+                                    for idx in range {
+                                        self.directories[idx] = bucket_idx;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -390,5 +439,21 @@ mod test {
         }
 
         assert_eq!(map.len(), 1000);
+    }
+
+    #[test]
+    fn remove_works() {
+        let mut map = HashMap::new();
+        for i in 0..1000 {
+            assert!(map.remove(&i).is_none());
+            map.insert(i, i);
+        }
+        assert_eq!(map.len(), 1000);
+
+        for i in 0..1000 {
+            assert_eq!(map.remove(&i), Some(i));
+        }
+
+        assert_eq!(map.len(), 0);
     }
 }

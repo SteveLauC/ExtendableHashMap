@@ -1,9 +1,11 @@
-use std::ops::RangeInclusive;
+use std::{
+    fmt::{Debug, Formatter},
+    ops::RangeInclusive,
+};
 
 pub(crate) const BUCKET_CAP: usize = 3;
 
 /// Bucket, where data is actually stored.
-#[derive(Debug)]
 pub(crate) struct Bucket<K, V> {
     /// Bits that are unique to this bucket.
     ///
@@ -25,6 +27,21 @@ pub(crate) struct Bucket<K, V> {
     /// Local depth equals `self.bits.len()`.
     pub(crate) bits: Vec<u8>,
     pub(crate) data: Vec<(K, V)>,
+}
+
+impl<K, V> Debug for Bucket<K, V>
+where
+    K: Debug,
+    V: Debug,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bucket")
+            .field("local depth", &self.bits.len())
+            .field("bits", &self.bits)
+            .field("data", &self.data)
+            .field("data len", &self.data.len())
+            .finish()
+    }
 }
 
 /// A bucket's value, this is the **index** of directory entries that pointing
