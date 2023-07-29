@@ -320,15 +320,18 @@ impl<K: Hash, V> HashMap<K, V> {
                     }
                     // remove the dead bucket
                     self.buckets.remove(dead_bucket_idx);
+
                     // directory entries for bucket since index `bucket_idx` are invalidated, update them
                     // All you need to do is to decrease the invalid "pointers" by 1
-                    self.directories.iter_mut().for_each(|entry| {
-                        assert_ne!(*entry, dead_bucket_idx);
+                    if dead_bucket_idx != self.buckets.len() {
+                        self.directories.iter_mut().for_each(|entry| {
+                            assert_ne!(*entry, dead_bucket_idx);
 
-                        if *entry > dead_bucket_idx {
-                            *entry -= 1;
-                        }
-                    });
+                            if *entry > dead_bucket_idx {
+                                *entry -= 1;
+                            }
+                        });
+                    }
                 }
             }
         }
