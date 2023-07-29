@@ -1,6 +1,6 @@
 use crate::{
     bucket::{
-        Bucket,
+        Bucket, BucketValue,
         BucketValue::{EqualTo, Range},
         BUCKET_CAP,
     },
@@ -277,91 +277,58 @@ impl<K: Hash, V> HashMap<K, V> {
                     < BUCKET_CAP
                 {
                     // begin coalescence
+                    let dead_bucket_idx: usize;
+                    let survivor_bucket_idx: usize;
+                    let dead_bucket_value: BucketValue;
+
                     if bucket_last_bit == 1 {
-                        let bucket_value =
+                        dead_bucket_idx = bucket_idx;
+                        survivor_bucket_idx = sibling_idx;
+                        dead_bucket_value =
                             immut_ref_bucket.value(self.global_depth);
-                        let bucket_data_clone = self
-                            .buckets
-                            .get_mut(bucket_idx)
-                            .unwrap()
-                            .data
-                            .drain(..)
-                            .collect::<Vec<_>>();
-                        let mut_ref_sibling_bucket =
-                            self.buckets.get_mut(sibling_idx).unwrap();
-
-                        // transfer data
-                        mut_ref_sibling_bucket.data.extend(bucket_data_clone);
-                        // decrease the local depth
-                        mut_ref_sibling_bucket.bits.pop().unwrap();
-                        // update directory entries
-                        match bucket_value {
-                            EqualTo(idx) => self.directories[idx] = sibling_idx,
-                            Range(range) => {
-                                for idx in range {
-                                    self.directories[idx] = sibling_idx;
-                                }
-                            }
-                        }
-
-                        self.buckets.remove(bucket_idx);
-
-                        // directory entries for bucket since index `bucket_idx` are invalidated, update them
-                        for bucket_idx in bucket_idx..self.buckets.len() {
-                            let value = self.buckets[bucket_idx]
-                                .value(self.global_depth);
-                            match value {
-                                EqualTo(idx) => {
-                                    self.directories[idx] = bucket_idx
-                                }
-                                Range(range) => {
-                                    for idx in range {
-                                        self.directories[idx] = bucket_idx;
-                                    }
-                                }
-                            }
-                        }
                     } else {
-                        let sibling_bucket_value =
+                        dead_bucket_idx = sibling_idx;
+                        survivor_bucket_idx = bucket_idx;
+                        dead_bucket_value =
                             immut_ref_sibling_bucket.value(self.global_depth);
-                        let sibling_bucket_data_clone = self
-                            .buckets
-                            .get_mut(sibling_idx)
-                            .unwrap()
-                            .data
-                            .drain(..)
-                            .collect::<Vec<_>>();
-                        let mut_ref_bucket =
-                            self.buckets.get_mut(bucket_idx).unwrap();
+                    }
 
-                        mut_ref_bucket.data.extend(sibling_bucket_data_clone);
-                        mut_ref_bucket.bits.pop().unwrap();
-                        match sibling_bucket_value {
-                            EqualTo(idx) => self.directories[idx] = bucket_idx,
-                            Range(range) => {
-                                for idx in range {
-                                    self.directories[idx] = bucket_idx;
-                                }
-                            }
+                    let dead_bucket_data_clone: Vec<_> = self
+                        .buckets
+                        .get_mut(dead_bucket_idx)
+                        .unwrap()
+                        .data
+                        .drain(..)
+                        .collect();
+                    let survivor_bucket_mut_ref =
+                        self.buckets.get_mut(survivor_bucket_idx).unwrap();
+
+                    // transfer data
+                    survivor_bucket_mut_ref.data.extend(dead_bucket_data_clone);
+                    // decrease the local depth
+                    survivor_bucket_mut_ref.bits.pop().unwrap();
+                    // update directory entries
+                    match dead_bucket_value {
+                        EqualTo(idx) => {
+                            self.directories[idx] = survivor_bucket_idx
                         }
-
-                        self.buckets.remove(sibling_idx);
-
-                        for bucket_idx in sibling_idx..self.buckets.len() {
-                            let value = self.buckets[bucket_idx]
-                                .value(self.global_depth);
-                            match value {
-                                EqualTo(idx) => {
-                                    self.directories[idx] = bucket_idx
-                                }
-                                Range(range) => {
-                                    for idx in range {
-                                        self.directories[idx] = bucket_idx;
-                                    }
-                                }
+                        Range(range) => {
+                            for idx in range {
+                                self.directories[idx] = survivor_bucket_idx;
                             }
                         }
                     }
+                    // remove the dead bucket
+                    self.buckets.remove(dead_bucket_idx);
+                    // directory entries for bucket since index `bucket_idx` are invalidated, update them
+                    // All you need to do is to decrease the invalid "pointers" by 1
+                    self.directories.iter_mut().for_each(|entry| {
+                        assert_ne!(*entry, dead_bucket_idx);
+
+                        if *entry > dead_bucket_idx {
+                            *entry -= 1;
+                        }
+                    });
                 }
             }
         }
